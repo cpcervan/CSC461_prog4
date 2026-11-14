@@ -314,6 +314,8 @@ function setupWebGL() {
         //gl.clearColor(0.0, 0.0, 0.0, 1.0); // use black when we clear the frame buffer
         gl.clearDepth(1.0); // use max when we clear the depth buffer
         gl.enable(gl.DEPTH_TEST); // use hidden surface removal (with zbuffering)
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       }
     } // end try
     
@@ -621,11 +623,11 @@ function setupShaders() {
                     finalColor = colorOut * texColor.rgb;
                 }
 
-                gl_FragColor = vec4(finalColor, texColor.a);
+                gl_FragColor = vec4(finalColor, texColor.a * uShininess);
             }
             else {
                 // No texture: use lighting only
-                gl_FragColor = vec4(colorOut, 1.0);
+                gl_FragColor = vec4(colorOut, uShininess);
             }
         }
     `;
@@ -747,8 +749,7 @@ function renderModels() {
     mat4.multiply(pvMatrix,pvMatrix,vMatrix); // projection * view
 
     // render each triangle set
-    var currSet; // the tri set and its material properties
-    for (var whichTriSet=0; whichTriSet<numTriangleSets; whichTriSet++) {
+    function drawTriangleSet(whichTriSet) {
         currSet = inputTriangles[whichTriSet];
         
         // make model transform, add to view project
@@ -784,8 +785,31 @@ function renderModels() {
         // triangle buffer: activate and render
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,triangleBuffers[whichTriSet]); // activate
         gl.drawElements(gl.TRIANGLES,3*triSetSizes[whichTriSet],gl.UNSIGNED_SHORT,0); // render
-        
-    } // end for each triangle set
+    }
+    
+    var opaqueSets = [];
+    var transparentSets = [];
+    for (var i = 0; i < numTriangleSets; i++) {
+        var alpha = inputTriangles[i].material.alpha ?? 1.0;
+
+        if (alpha >= 1.0) {
+            opaqueSets.push(i);
+        }
+        else {
+            transparentSets.push(i);
+        }
+    }
+
+    gl.depthMask(true);
+    for (var i = 0; i < opaqueSets.length; i++) {
+        drawTriangleSet(opaqueSets[i]);
+    }
+    gl.depthMask(false);
+    for (var i = 0; i < transparentSets.length; i++) {
+        drawTriangleSet(transparentSets[i]);
+    }
+    // Restore depth writing
+    gl.depthMask(true);
     
     // render each ellipsoid
     var ellipsoid, instanceTransform = mat4.create(); // the current ellipsoid and material
