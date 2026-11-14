@@ -36,11 +36,15 @@ var specularULoc; // where to put specular reflecivity for fragment shader
 var shininessULoc; // where to put specular exponent for fragment shader
 var vUVAttribLoc;
 var samplerULoc;
+var blendModeULoc;
+var useTextureULoc;
+var eyePositionULoc;
 
 /* interaction variables */
 var Eye = vec3.clone(defaultEye); // eye position in world space
 var Center = vec3.clone(defaultCenter); // view direction in world space
 var Up = vec3.clone(defaultUp); // view up vector in world space
+var blendMode = 1; // 0 = replace, 1 = modulate
 
 function loadTexture(texturePath) {
     var texture = gl.createTexture();
@@ -49,15 +53,8 @@ function loadTexture(texturePath) {
 
     // Temporary pixel while image loads
     gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        1,
-        1,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        new Uint8Array([255, 255, 255, 255])
+        gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255])
     );
 
     var image = new Image();
@@ -69,12 +66,8 @@ function loadTexture(texturePath) {
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
         gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            gl.RGBA,
-            gl.RGBA,
-            gl.UNSIGNED_BYTE,
-            image
+            gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+            gl.UNSIGNED_BYTE, image
         );
 
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -118,7 +111,7 @@ function getJSONFile(url,descr) {
 } // end get input json file
 
 // does stuff when keys are pressed
-function handleKeyDown(event) {
+function handleKeyDown(event) { 
     
     const modelEnum = {TRIANGLES: "triangles", ELLIPSOID: "ellipsoid"}; // enumerated model type
     const dirEnum = {NEGATIVE: -1, POSITIVE: 1}; // enumerated rotation direction
@@ -279,6 +272,14 @@ function handleKeyDown(event) {
                 vec3.set(inputEllipsoids[whichTriSet].xAxis,1,0,0);
                 vec3.set(inputEllipsoids[whichTriSet].yAxis,0,1,0);
             } // end for all ellipsoids
+            break;
+
+        // Input toggles
+        case "KeyB":
+            blendMode = (blendMode + 1) % 2;
+            console.log(
+                blendMode === 0 ? "Texture Replace Mode" : "Texture Modulate Mode"
+            );
             break;
     } // end switch
 } // end handleKeyDown
@@ -532,15 +533,29 @@ function setupShaders() {
     // define vertex shader in essl using es6 template strings
     var vShaderCode = `
         attribute vec3 aVertexPosition;
+        attribute vec3 aVertexNormal;
         attribute vec2 aVertexUV;
 
         uniform mat4 umMatrix;
         uniform mat4 upvmMatrix;
 
+        varying vec3 vWorldPos;
+        varying vec3 vVertexNormal;
         varying vec2 vUV;
 
         void main(void) {
+            vec4 vWorldPos4 = umMatrix * vec4(aVertexPosition, 1.0);
+            vWorldPos = vec3(vWorldPos4.x, vWorldPos4.y, vWorldPos4.z);
+            
             gl_Position = upvmMatrix * vec4(aVertexPosition, 1.0);
+
+            vec4 vWorldNormal4 = umMatrix * vec4(aVertexNormal, 0.0);
+            vVertexNormal = normalize(vec3(
+                vWorldNormal4.x,
+                vWorldNormal4.y,
+                vWorldNormal4.z
+            ));
+
             vUV = vec2(1.0 - aVertexUV.x,aVertexUV.y);
         }
     `;
@@ -549,12 +564,69 @@ function setupShaders() {
     var fShaderCode = `
         precision mediump float;
 
-        uniform sampler2D uSampler;
+         // Material properties
+        uniform vec3 uAmbient;
+        uniform vec3 uDiffuse;
+        uniform vec3 uSpecular;
+        uniform float uShininess;
 
+        // Light properties
+        uniform vec3 uLightAmbient;
+        uniform vec3 uLightDiffuse;
+        uniform vec3 uLightSpecular;
+        uniform vec3 uLightPosition;
+        uniform vec3 uEyePosition;
+
+        uniform sampler2D uSampler;
+        uniform int uBlendMode;
+        uniform bool uUseTexture;
+
+        varying vec3 vWorldPos;
+        varying vec3 vVertexNormal;
         varying vec2 vUV;
 
         void main(void) {
-            gl_FragColor = texture2D(uSampler, vUV);
+            // Ambient term
+            vec3 ambient = uAmbient * uLightAmbient;
+
+            // Diffuse term
+            vec3 normal = normalize(vVertexNormal);
+            vec3 light = normalize(uLightPosition - vWorldPos);
+            float lambert = max(0.0, dot(normal, light));
+            vec3 diffuse = uDiffuse * uLightDiffuse * lambert;
+
+            // Specular term
+            vec3 eye = normalize(uEyePosition - vWorldPos);
+            vec3 halfVec = normalize(light + eye);
+            float highlight = pow(
+                max(0.0, dot(normal, halfVec)),
+                uShininess
+            );
+            vec3 specular = uSpecular * uLightSpecular * highlight;
+
+            // Combine lighting
+            vec3 colorOut = ambient + diffuse + specular;
+
+            vec3 finalColor = colorOut;
+
+            if (uUseTexture) {
+                vec4 texColor = texture2D(uSampler, vUV);
+
+                if (uBlendMode == 0) {
+                    // Replace: texture only
+                    finalColor = texColor.rgb;
+                }
+                else {
+                    // Modulate: texture multiplied by lighting
+                    finalColor = colorOut * texColor.rgb;
+                }
+
+                gl_FragColor = vec4(finalColor, texColor.a);
+            }
+            else {
+                // No texture: use lighting only
+                gl_FragColor = vec4(colorOut, 1.0);
+            }
         }
     `;
     
@@ -587,15 +659,35 @@ function setupShaders() {
                 // locate and enable vertex attributes
                 vPosAttribLoc = gl.getAttribLocation(shaderProgram, "aVertexPosition");
                 gl.enableVertexAttribArray(vPosAttribLoc);
-
+                vNormAttribLoc = gl.getAttribLocation(shaderProgram, "aVertexNormal"); // ptr to vertex normal attrib
+                gl.enableVertexAttribArray(vNormAttribLoc); // connect attrib to array
                 vUVAttribLoc = gl.getAttribLocation(shaderProgram, "aVertexUV");
                 gl.enableVertexAttribArray(vUVAttribLoc);
 
                 mMatrixULoc = gl.getUniformLocation(shaderProgram, "umMatrix");
                 pvmMatrixULoc = gl.getUniformLocation(shaderProgram, "upvmMatrix");
-
                 samplerULoc = gl.getUniformLocation(shaderProgram, "uSampler");
+                blendModeULoc = gl.getUniformLocation(shaderProgram, "uBlendMode");
+                useTextureULoc = gl.getUniformLocation(shaderProgram, "uUseTexture");   
                 gl.uniform1i(samplerULoc, 0);
+
+                 // locate fragment uniforms
+                eyePositionULoc = gl.getUniformLocation(shaderProgram, "uEyePosition"); // ptr to eye position
+                var lightAmbientULoc = gl.getUniformLocation(shaderProgram, "uLightAmbient"); // ptr to light ambient
+                var lightDiffuseULoc = gl.getUniformLocation(shaderProgram, "uLightDiffuse"); // ptr to light diffuse
+                var lightSpecularULoc = gl.getUniformLocation(shaderProgram, "uLightSpecular"); // ptr to light specular
+                var lightPositionULoc = gl.getUniformLocation(shaderProgram, "uLightPosition"); // ptr to light position
+                ambientULoc = gl.getUniformLocation(shaderProgram, "uAmbient"); // ptr to ambient
+                diffuseULoc = gl.getUniformLocation(shaderProgram, "uDiffuse"); // ptr to diffuse
+                specularULoc = gl.getUniformLocation(shaderProgram, "uSpecular"); // ptr to specular
+                shininessULoc = gl.getUniformLocation(shaderProgram, "uShininess"); // ptr to shininess
+
+                 // pass global constants into fragment uniforms
+                gl.uniform3fv(eyePositionULoc,Eye); // pass in the eye's position
+                gl.uniform3fv(lightAmbientULoc,lightAmbient); // pass in the light's ambient emission
+                gl.uniform3fv(lightDiffuseULoc,lightDiffuse); // pass in the light's diffuse emission
+                gl.uniform3fv(lightSpecularULoc,lightSpecular); // pass in the light's specular emission
+                gl.uniform3fv(lightPositionULoc,lightPosition); // pass in the light's position
             } // end if no shader program link errors
         } // end if no compile errors
     } // end try 
@@ -665,6 +757,18 @@ function renderModels() {
         gl.uniformMatrix4fv(mMatrixULoc, false, mMatrix); // pass in the m matrix
         gl.uniformMatrix4fv(pvmMatrixULoc, false, pvmMatrix); // pass in the hpvm matrix
         
+        gl.uniform3fv(ambientULoc, currSet.material.ambient);
+        gl.uniform3fv(diffuseULoc, currSet.material.diffuse);
+        gl.uniform3fv(specularULoc, currSet.material.specular);
+        gl.uniform1f(shininessULoc, currSet.material.n);
+        gl.uniform3fv(eyePositionULoc, Eye);
+
+        // Enable texture rendering
+        gl.uniform1i(useTextureULoc, 1);
+
+        // Set the current blending mode
+        gl.uniform1i(blendModeULoc, blendMode);
+
         // Activate texture
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, textures[whichTriSet]);
@@ -672,6 +776,8 @@ function renderModels() {
         // vertex buffer: activate and feed into vertex shader
         gl.bindBuffer(gl.ARRAY_BUFFER,vertexBuffers[whichTriSet]); // activate
         gl.vertexAttribPointer(vPosAttribLoc,3,gl.FLOAT,false,0,0); // feed
+        gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffers[whichTriSet]);
+        gl.vertexAttribPointer(vNormAttribLoc, 3, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffers[whichTriSet]);
         gl.vertexAttribPointer(vUVAttribLoc,2,gl.FLOAT,false,0,0);
 
@@ -706,6 +812,7 @@ function renderModels() {
         gl.vertexAttribPointer(vNormAttribLoc,3,gl.FLOAT,false,0,0); // feed normal buffer to shader
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,triangleBuffers[numTriangleSets+whichEllipsoid]); // activate tri buffer
         
+        gl.uniform1i(useTextureULoc, 0);
         // draw a transformed instance of the ellipsoid
         gl.drawElements(gl.TRIANGLES,triSetSizes[numTriangleSets+whichEllipsoid],gl.UNSIGNED_SHORT,0); // render
     } // end for each ellipsoid
