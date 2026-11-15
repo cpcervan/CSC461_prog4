@@ -42,12 +42,14 @@ var useTextureULoc;
 var eyePositionULoc;
 var lightMapLoc;
 var useLightMapLoc;
+var alphaULoc;
 
 /* interaction variables */
 var Eye = vec3.clone(defaultEye); // eye position in world space
 var Center = vec3.clone(defaultCenter); // view direction in world space
 var Up = vec3.clone(defaultUp); // view up vector in world space
 var blendMode = 1; // 0 = replace, 1 = modulate
+var sortTransparency = false;
 
 function loadTexture(texturePath) {
     var texture = gl.createTexture();
@@ -283,6 +285,15 @@ function handleKeyDown(event) {
             console.log(
                 blendMode === 0 ? "Texture Replace Mode" : "Texture Modulate Mode"
             );
+            break;
+        case "Comma":
+            sortTransparency = false;
+            console.log("Transparency sorting OFF");
+            break;
+
+        case "Period":
+            sortTransparency = true;
+            console.log("Transparency sorting ON");
             break;
     } // end switch
 } // end handleKeyDown
@@ -575,6 +586,7 @@ function setupShaders() {
         uniform vec3 uDiffuse;
         uniform vec3 uSpecular;
         uniform float uShininess;
+        uniform float uAlpha;
 
         // Light properties
         uniform vec3 uLightAmbient;
@@ -638,11 +650,11 @@ function setupShaders() {
                     finalColor *= lightMapColor;
                 }
 
-                gl_FragColor = vec4(finalColor, texColor.a * uShininess);
+                gl_FragColor = vec4(finalColor, texColor.a * uAlpha);
             }
             else {
                 // No texture: use lighting only
-                gl_FragColor = vec4(colorOut, uShininess);
+                gl_FragColor = vec4(colorOut, uAlpha);
             }
         }
     `;
@@ -701,6 +713,7 @@ function setupShaders() {
                 diffuseULoc = gl.getUniformLocation(shaderProgram, "uDiffuse"); // ptr to diffuse
                 specularULoc = gl.getUniformLocation(shaderProgram, "uSpecular"); // ptr to specular
                 shininessULoc = gl.getUniformLocation(shaderProgram, "uShininess"); // ptr to shininess
+                alphaULoc = gl.getUniformLocation(shaderProgram, "uAlpha"); // ptr to shininess
 
                  // pass global constants into fragment uniforms
                 gl.uniform3fv(eyePositionULoc,Eye); // pass in the eye's position
@@ -780,6 +793,7 @@ function renderModels() {
         gl.uniform3fv(diffuseULoc, currSet.material.diffuse);
         gl.uniform3fv(specularULoc, currSet.material.specular);
         gl.uniform1f(shininessULoc, currSet.material.n);
+        gl.uniform1f(alphaULoc, currSet.material.alpha ?? 1.0);
         gl.uniform3fv(eyePositionULoc, Eye);
 
         // Enable texture rendering
@@ -791,7 +805,7 @@ function renderModels() {
         // Activate texture
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, textures[whichTriSet]);
-        if (lightMapTexture != null && whichTriSet == 1) {
+        if (lightMapTexture != null && whichTriSet == 1) { // LIGHT MAP THINGY HERE ___--------------____________----------______________
             gl.activeTexture(gl.TEXTURE1);
             gl.bindTexture(gl.TEXTURE_2D, lightMapTexture);
             gl.uniform1i(lightMapLoc, 1);
@@ -813,6 +827,131 @@ function renderModels() {
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,triangleBuffers[whichTriSet]); // activate
         gl.drawElements(gl.TRIANGLES,3*triSetSizes[whichTriSet],gl.UNSIGNED_SHORT,0); // render
     }
+    function getTransparentTriangles() {
+        var transparentTriangles = [];
+
+        for (var setIndex of transparentSets) {
+            var currSet = inputTriangles[setIndex];
+
+            // Get the model transform
+            makeModelTransform(currSet);
+
+            // Combine view and model transformations
+            var modelViewMatrix = mat4.create();
+            mat4.multiply(modelViewMatrix, vMatrix, mMatrix);
+
+            // Examine every triangle in this set
+            for (var triIndex = 0;
+                triIndex < currSet.triangles.length;
+                triIndex++) {
+
+                var triangle = currSet.triangles[triIndex];
+
+                var averageDepth = 0;
+
+                // Calculate the average view-space Z
+                for (var j = 0; j < 3; j++) {
+                    var vertex = currSet.vertices[triangle[j]];
+
+                    var transformed = vec4.fromValues(
+                        vertex[0],
+                        vertex[1],
+                        vertex[2],
+                        1.0
+                    );
+
+                    vec4.transformMat4(
+                        transformed,
+                        transformed,
+                        modelViewMatrix
+                    );
+
+                    averageDepth += transformed[2];
+                }
+
+                averageDepth /= 3;
+
+                transparentTriangles.push({
+                    setIndex: setIndex,
+                    triIndex: triIndex,
+                    depth: averageDepth
+                });
+            }
+        }
+
+        return transparentTriangles;
+    }
+    function sortTransparentTriangles(triangles) {
+        triangles.sort(function(a, b) {
+            return a.depth - b.depth;
+        });
+
+        return triangles;
+    }
+    function drawSortedTransparentTriangles(sortedTriangles) {
+        var previousSet = -1;
+
+        for (var tri of sortedTriangles) {
+            var setIndex = tri.setIndex;
+
+            // Only set up buffers/uniforms when changing sets
+            if (setIndex !== previousSet) {
+                currSet = inputTriangles[setIndex];
+
+                makeModelTransform(currSet);
+                mat4.multiply(pvmMatrix, pvMatrix, mMatrix);
+
+                gl.uniformMatrix4fv(mMatrixULoc, false, mMatrix);
+                gl.uniformMatrix4fv(pvmMatrixULoc, false, pvmMatrix);
+
+                gl.uniform3fv(ambientULoc, currSet.material.ambient);
+                gl.uniform3fv(diffuseULoc, currSet.material.diffuse);
+                gl.uniform3fv(specularULoc, currSet.material.specular);
+                gl.uniform1f(shininessULoc, currSet.material.n);
+
+                gl.uniform3fv(eyePositionULoc, Eye);
+
+                gl.uniform1i(useTextureULoc, 1);
+                gl.uniform1i(blendModeULoc, blendMode);
+
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, textures[setIndex]);
+
+                if (lightMapTexture != null && setIndex == 1) {
+                    gl.activeTexture(gl.TEXTURE1);
+                    gl.bindTexture(gl.TEXTURE_2D, lightMapTexture);
+                    gl.uniform1i(lightMapLoc, 1);
+                    gl.uniform1i(useLightMapLoc, true);
+                } else {
+                    gl.uniform1i(useLightMapLoc, false);
+                }
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffers[setIndex]);
+                gl.vertexAttribPointer(vPosAttribLoc, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffers[setIndex]);
+                gl.vertexAttribPointer(vNormAttribLoc, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffers[setIndex]);
+                gl.vertexAttribPointer(vUVAttribLoc, 2, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(
+                    gl.ELEMENT_ARRAY_BUFFER,
+                    triangleBuffers[setIndex]
+                );
+
+                previousSet = setIndex;
+            }
+
+            // Draw only this triangle
+            gl.drawElements(
+                gl.TRIANGLES,
+                3,
+                gl.UNSIGNED_SHORT,
+                tri.triIndex * 3 * Uint16Array.BYTES_PER_ELEMENT
+            );
+        }
+    }
     
     var opaqueSets = [];
     var transparentSets = [];
@@ -832,8 +971,16 @@ function renderModels() {
         drawTriangleSet(opaqueSets[i]);
     }
     gl.depthMask(false);
-    for (var i = 0; i < transparentSets.length; i++) {
-        drawTriangleSet(transparentSets[i]);
+    if (sortTransparency) {
+        var triangles = getTransparentTriangles();
+        triangles = sortTransparentTriangles(triangles);
+
+        drawSortedTransparentTriangles(triangles);
+    }
+    else {
+        for (var i = 0; i < transparentSets.length; i++) {
+            drawTriangleSet(transparentSets[i]);
+        }
     }
     // Restore depth writing
     gl.depthMask(true);
