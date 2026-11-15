@@ -25,6 +25,7 @@ var triangleBuffers = []; // lists of indices into vertexBuffers by set, in trip
 var viewDelta = 0; // how much to displace view with each key press
 var uvBuffers = [];
 var textures = [];
+var lightMapTexture = null;
 
 /* shader parameter locations */
 var vPosAttribLoc; // where to put position for vertex shader
@@ -39,6 +40,8 @@ var samplerULoc;
 var blendModeULoc;
 var useTextureULoc;
 var eyePositionULoc;
+var lightMapLoc;
+var useLightMapLoc;
 
 /* interaction variables */
 var Eye = vec3.clone(defaultEye); // eye position in world space
@@ -327,7 +330,8 @@ function setupWebGL() {
 
 // read models in, load them into webgl buffers
 function loadModels() {
-    
+    lightMapTexture = loadTexture("https://ncsucgclass.github.io/prog4/lightmap.gif");
+
     // make an ellipsoid, with numLongSteps longitudes.
     // start with a sphere of radius 1 at origin
     // Returns verts, tris and normals.
@@ -580,8 +584,10 @@ function setupShaders() {
         uniform vec3 uEyePosition;
 
         uniform sampler2D uSampler;
+        uniform sampler2D uLightMap;    
         uniform int uBlendMode;
         uniform bool uUseTexture;
+        uniform bool uUseLightMap;
 
         varying vec3 vWorldPos;
         varying vec3 vVertexNormal;
@@ -614,6 +620,10 @@ function setupShaders() {
             if (uUseTexture) {
                 vec4 texColor = texture2D(uSampler, vUV);
 
+                if (texColor.a < 0.1) {
+                    discard;
+                }
+
                 if (uBlendMode == 0) {
                     // Replace: texture only
                     finalColor = texColor.rgb;
@@ -621,6 +631,11 @@ function setupShaders() {
                 else {
                     // Modulate: texture multiplied by lighting
                     finalColor = colorOut * texColor.rgb;
+                }
+
+                if (uUseLightMap) {
+                    vec3 lightMapColor = texture2D(uLightMap, vUV).rgb;
+                    finalColor *= lightMapColor;
                 }
 
                 gl_FragColor = vec4(finalColor, texColor.a * uShininess);
@@ -665,6 +680,9 @@ function setupShaders() {
                 gl.enableVertexAttribArray(vNormAttribLoc); // connect attrib to array
                 vUVAttribLoc = gl.getAttribLocation(shaderProgram, "aVertexUV");
                 gl.enableVertexAttribArray(vUVAttribLoc);
+
+                lightMapLoc = gl.getUniformLocation(shaderProgram, "uLightMap");
+                useLightMapLoc = gl.getUniformLocation(shaderProgram, "uUseLightMap");
 
                 mMatrixULoc = gl.getUniformLocation(shaderProgram, "umMatrix");
                 pvmMatrixULoc = gl.getUniformLocation(shaderProgram, "upvmMatrix");
@@ -751,7 +769,7 @@ function renderModels() {
     // render each triangle set
     function drawTriangleSet(whichTriSet) {
         currSet = inputTriangles[whichTriSet];
-        
+
         // make model transform, add to view project
         makeModelTransform(currSet);
         mat4.multiply(pvmMatrix,pvMatrix,mMatrix); // project * view * model
@@ -773,6 +791,15 @@ function renderModels() {
         // Activate texture
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, textures[whichTriSet]);
+        if (lightMapTexture != null && whichTriSet == 1) {
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, lightMapTexture);
+            gl.uniform1i(lightMapLoc, 1);
+
+            gl.uniform1i(useLightMapLoc, true);
+        } else {
+            gl.uniform1i(useLightMapLoc, false);
+        }
         
         // vertex buffer: activate and feed into vertex shader
         gl.bindBuffer(gl.ARRAY_BUFFER,vertexBuffers[whichTriSet]); // activate
